@@ -1,4 +1,4 @@
-name: Deploy SVG Subpaths
+name: Deploy SVG Pages
 
 on:
   push:
@@ -22,7 +22,7 @@ jobs:
         with:
           node-version: 18
 
-      - name: Run Build
+      - name: Build Application
         run: node build.js
 
       - name: Deploy to GitHub Pages
