@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
+const { execSync } = require("child_process");
 
 const distDir = path.join(process.cwd(), "dist");
 if (fs.existsSync(distDir)) {
@@ -11,7 +12,7 @@ fs.writeFileSync(path.join(distDir, ".nojekyll"), "");
 
 const repoName = process.env.GITHUB_REPOSITORY
   ? process.env.GITHUB_REPOSITORY.split("/")[1]
-  : "new-repo-name";
+  : "svg-bulk-deploy";
 const repoPrefix = `/${repoName}/`;
 
 function downloadBuffer(url) {
@@ -31,21 +32,41 @@ function downloadBuffer(url) {
 }
 
 async function runBuild() {
-  console.log("Downloading SVG asset...");
-  const svgUrl = "https://cdn.jsdelivr.net/gh/dorianhagar506-coder/svgbulk-qocu4i@main/mizu-1-kbez.svg";
-  const svgFilename = "app.svg";
+  console.log("Extracting all upstream SVGs...");
+
+  const repoTarUrl = "https://codeload.github.com/dorianhagar506-coder/svgbulk-qocu4i/tar.gz/refs/heads/main";
+  const tarPath = path.join(process.cwd(), "temp_svg.tar.gz");
+  const extractDir = path.join(process.cwd(), "temp_extracted");
 
   try {
-    const svgData = await downloadBuffer(svgUrl);
-    fs.writeFileSync(path.join(distDir, svgFilename), svgData);
-    console.log("SVG asset saved to root.");
+    const tarBuffer = await downloadBuffer(repoTarUrl);
+    fs.writeFileSync(tarPath, tarBuffer);
+
+    if (fs.existsSync(extractDir)) {
+      fs.rmSync(extractDir, { recursive: true, force: true });
+    }
+    fs.mkdirSync(extractDir, { recursive: true });
+
+    execSync(`tar -xzf "${tarPath}" -C "${extractDir}" --strip-components=1`);
   } catch (err) {
-    console.error("Failed to download target SVG:", err.message);
+    console.error("Download failed:", err.message);
     process.exit(1);
   }
 
-  // Wrapper template using an <object> element to load the root SVG
-  const pageTemplate = `<!DOCTYPE html>
+  // Find all SVGs from the extracted repo and copy them to dist root
+  const svgFiles = fs.readdirSync(extractDir).filter((file) => file.endsWith(".svg"));
+  for (const svg of svgFiles) {
+    fs.copyFileSync(path.join(extractDir, svg), path.join(distDir, svg));
+  }
+
+  fs.rmSync(tarPath, { force: true });
+  fs.rmSync(extractDir, { recursive: true, force: true });
+
+  console.log(`Copied ${svgFiles.length} SVG templates to root.`);
+
+  // Subfolder template generator
+  function getPageHtml(svgTarget) {
+    return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -57,17 +78,19 @@ async function runBuild() {
   </style>
 </head>
 <body>
-  <object data="${repoPrefix}${svgFilename}" type="image/svg+xml"></object>
+  <object data="${repoPrefix}${svgTarget}" type="image/svg+xml"></object>
 </body>
 </html>`;
+  }
 
+  // Generate 5,000 subfolders
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
   function getRandomSegment(minLen = 4, maxLen = 10) {
-    const length = Math.floor(Math.random() * (maxLen - minLen + 1)) + minLen;
+    const len = Math.floor(Math.random() * (maxLen - minLen + 1)) + minLen;
     let seg = "";
-    for (let i = 0; i < length; i++) seg += chars.charAt(Math.floor(Math.random() * chars.length));
+    for (let i = 0; i < len; i++) seg += chars.charAt(Math.floor(Math.random() * chars.length));
     return seg;
   }
 
@@ -88,11 +111,15 @@ async function runBuild() {
   for (const nestedPath of uniquePaths) {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
-    fs.writeFileSync(path.join(folderPath, "index.html"), pageTemplate);
+
+    // Rotate or randomly pick one of the 5 SVGs
+    const chosenSvg = svgFiles[Math.floor(Math.random() * svgFiles.length)];
+    fs.writeFileSync(path.join(folderPath, "index.html"), getPageHtml(chosenSvg));
+
     masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // Root directory index
+  // Root Directory Index Dashboard
   const masterIndexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
