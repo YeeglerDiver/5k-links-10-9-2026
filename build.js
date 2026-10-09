@@ -12,7 +12,7 @@ fs.writeFileSync(path.join(distDir, ".nojekyll"), "");
 
 const repoName = process.env.GITHUB_REPOSITORY
   ? process.env.GITHUB_REPOSITORY.split("/")[1]
-  : "svg-bulk-deploy";
+  : "5k-links-10-9-2026";
 const repoPrefix = `/${repoName}/`;
 
 function downloadBuffer(url) {
@@ -22,7 +22,7 @@ function downloadBuffer(url) {
         return downloadBuffer(res.headers.location).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) {
-        return reject(new Error(`Failed to fetch ${url}, status: ${res.statusCode}`));
+        return reject(new Error(`Failed to fetch ${url}, status:${res.statusCode}`));
       }
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
@@ -32,7 +32,7 @@ function downloadBuffer(url) {
 }
 
 async function runBuild() {
-  console.log("Extracting all upstream SVGs...");
+  console.log("Extracting upstream SVGs and runtime assets...");
 
   const repoTarUrl = "https://codeload.github.com/dorianhagar506-coder/svgbulk-qocu4i/tar.gz/refs/heads/main";
   const tarPath = path.join(process.cwd(), "temp_svg.tar.gz");
@@ -53,18 +53,69 @@ async function runBuild() {
     process.exit(1);
   }
 
-  // Find all SVGs from the extracted repo and copy them to dist root
+  // 1. Copy all extracted SVGs to dist root
   const svgFiles = fs.readdirSync(extractDir).filter((file) => file.endsWith(".svg"));
   for (const svg of svgFiles) {
     fs.copyFileSync(path.join(extractDir, svg), path.join(distDir, svg));
   }
-
   fs.rmSync(tarPath, { force: true });
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  console.log(`Copied ${svgFiles.length} SVG templates to root.`);
+  // 2. Resolve missing storage/browser/mizu.all.js dependency
+  const storageDir = path.join(distDir, "storage", "browser");
+  fs.mkdirSync(storageDir, { recursive: true });
 
-  // Subfolder template generator
+  const mizuRuntimeUrls = [
+    "https://cdn.jsdelivr.net/gh/MercuryWorkshop/mizu@main/dist/mizu.all.js",
+    "https://raw.githubusercontent.com/MercuryWorkshop/mizu/main/dist/mizu.all.js"
+  ];
+
+  let mizuFetched = false;
+  for (const url of mizuRuntimeUrls) {
+    try {
+      console.log(`Fetching mizu.all.js from ${url}...`);
+      const buf = await downloadBuffer(url);
+      fs.writeFileSync(path.join(storageDir, "mizu.all.js"), buf);
+      // Also place at root as a fallback lookup
+      fs.writeFileSync(path.join(distDir, "mizu.all.js"), buf);
+      mizuFetched = true;
+      break;
+    } catch (e) {
+      console.warn(`Could not fetch from ${url}, trying fallback...`);
+    }
+  }
+
+  if (!mizuFetched) {
+    console.error("Failed to download mizu.all.js runtime bundle.");
+  }
+
+  // 3. Patch Wisp URLs and asset paths inside the SVG files
+  const TARGET_WISP = "wss://wisp.mercurywork.shop/";
+  const deadWispHosts = [
+    "mizu.xn--48jq.icu",
+    "quiz.kate.hr",
+    "algebra.galeriehametner.at",
+    "algebra.couchit.net"
+  ];
+
+  for (const svgName of svgFiles) {
+    const svgPath = path.join(distDir, svgName);
+    let content = fs.readFileSync(svgPath, "utf8");
+
+    // Replace dead Wisp domains with working endpoint
+    for (const host of deadWispHosts) {
+      content = content.split(`wss://${host}/wisp/`).join(TARGET_WISP);
+      content = content.split(`wss://${host}/wisp`).join(TARGET_WISP);
+      content = content.split(host).join("wisp.mercurywork.shop");
+    }
+
+    // Ensure storage path points correctly to repoPrefix
+    content = content.replace(/(['"`])(?:\.\/|\/)?storage\/browser\/mizu\.all\.js/g, `$1${repoPrefix}storage/browser/mizu.all.js`);
+
+    fs.writeFileSync(svgPath, content, "utf8");
+  }
+
+  // 4. Subfolder page template
   function getPageHtml(svgTarget) {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -83,7 +134,7 @@ async function runBuild() {
 </html>`;
   }
 
-  // Generate 5,000 subfolders
+  // 5. Generate 5,000 unique paths
   const TOTAL_PAGES = 5000;
   const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -112,14 +163,13 @@ async function runBuild() {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
 
-    // Rotate or randomly pick one of the 5 SVGs
     const chosenSvg = svgFiles[Math.floor(Math.random() * svgFiles.length)];
     fs.writeFileSync(path.join(folderPath, "index.html"), getPageHtml(chosenSvg));
 
     masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // Root Directory Index Dashboard
+  // 6. Directory index page
   const masterIndexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
