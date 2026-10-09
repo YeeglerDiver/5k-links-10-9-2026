@@ -22,7 +22,7 @@ function downloadBuffer(url) {
         return downloadBuffer(res.headers.location).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) {
-        return reject(new Error(`Failed to fetch ${url}, status:${res.statusCode}`));
+        return reject(new Error(`Failed to fetch ${url}, status: ${res.statusCode}`));
       }
       const chunks = [];
       res.on("data", (chunk) => chunks.push(chunk));
@@ -32,7 +32,7 @@ function downloadBuffer(url) {
 }
 
 async function runBuild() {
-  console.log("Extracting upstream SVGs and runtime assets...");
+  console.log("Extracting upstream SVGs...");
 
   const repoTarUrl = "https://codeload.github.com/dorianhagar506-coder/svgbulk-qocu4i/tar.gz/refs/heads/main";
   const tarPath = path.join(process.cwd(), "temp_svg.tar.gz");
@@ -53,7 +53,7 @@ async function runBuild() {
     process.exit(1);
   }
 
-  // 1. Copy all extracted SVGs to dist root
+  // 1. Copy all SVGs to dist root
   const svgFiles = fs.readdirSync(extractDir).filter((file) => file.endsWith(".svg"));
   for (const svg of svgFiles) {
     fs.copyFileSync(path.join(extractDir, svg), path.join(distDir, svg));
@@ -61,61 +61,58 @@ async function runBuild() {
   fs.rmSync(tarPath, { force: true });
   fs.rmSync(extractDir, { recursive: true, force: true });
 
-  // 2. Resolve missing storage/browser/mizu.all.js dependency
+  // 2. Download mizu.all.js and populate all directory lookups
   const storageDir = path.join(distDir, "storage", "browser");
   fs.mkdirSync(storageDir, { recursive: true });
 
-  const mizuRuntimeUrls = [
+  const mizuCdnUrls = [
     "https://cdn.jsdelivr.net/gh/MercuryWorkshop/mizu@main/dist/mizu.all.js",
-    "https://raw.githubusercontent.com/MercuryWorkshop/mizu/main/dist/mizu.all.js"
+    "https://raw.githubusercontent.com/MercuryWorkshop/mizu/main/dist/mizu.all.js",
+    "https://unpkg.com/@mercuryworkshop/mizu/dist/mizu.all.js"
   ];
 
-  let mizuFetched = false;
-  for (const url of mizuRuntimeUrls) {
+  let mizuBuffer = null;
+  for (const url of mizuCdnUrls) {
     try {
-      console.log(`Fetching mizu.all.js from ${url}...`);
-      const buf = await downloadBuffer(url);
-      fs.writeFileSync(path.join(storageDir, "mizu.all.js"), buf);
-      // Also place at root as a fallback lookup
-      fs.writeFileSync(path.join(distDir, "mizu.all.js"), buf);
-      mizuFetched = true;
+      console.log(`Downloading mizu.all.js from ${url}...`);
+      mizuBuffer = await downloadBuffer(url);
       break;
     } catch (e) {
-      console.warn(`Could not fetch from ${url}, trying fallback...`);
+      console.warn(`Failed downloading from ${url}, testing next mirror...`);
     }
   }
 
-  if (!mizuFetched) {
-    console.error("Failed to download mizu.all.js runtime bundle.");
+  if (mizuBuffer) {
+    fs.writeFileSync(path.join(storageDir, "mizu.all.js"), mizuBuffer);
+    fs.writeFileSync(path.join(distDir, "mizu.all.js"), mizuBuffer);
+  } else {
+    console.error("Warning: Could not fetch remote mizu.all.js runtime.");
   }
 
-  // 3. Patch Wisp URLs and asset paths inside the SVG files
+  // 3. Patch Wisp endpoints and path references inside each SVG
   const TARGET_WISP = "wss://wisp.mercurywork.shop/";
-  const deadWispHosts = [
-    "mizu.xn--48jq.icu",
-    "quiz.kate.hr",
-    "algebra.galeriehametner.at",
-    "algebra.couchit.net"
-  ];
 
   for (const svgName of svgFiles) {
     const svgPath = path.join(distDir, svgName);
     let content = fs.readFileSync(svgPath, "utf8");
 
-    // Replace dead Wisp domains with working endpoint
-    for (const host of deadWispHosts) {
-      content = content.split(`wss://${host}/wisp/`).join(TARGET_WISP);
-      content = content.split(`wss://${host}/wisp`).join(TARGET_WISP);
-      content = content.split(host).join("wisp.mercurywork.shop");
-    }
+    // Replace dead Wisp WebSocket links
+    content = content
+      .replace(/wss?:\/\/mizu\.xn--48jq\.icu\/wisp\/?/g, TARGET_WISP)
+      .replace(/wss?:\/\/quiz\.kate\.hr\/wisp\/?/g, TARGET_WISP)
+      .replace(/wss?:\/\/algebra\.galeriehametner\.at\/wisp\/?/g, TARGET_WISP)
+      .replace(/wss?:\/\/algebra\.couchit\.net\/wisp\/?/g, TARGET_WISP);
 
-    // Ensure storage path points correctly to repoPrefix
-    content = content.replace(/(['"`])(?:\.\/|\/)?storage\/browser\/mizu\.all\.js/g, `$1${repoPrefix}storage/browser/mizu.all.js`);
+    // Rewrite relative runtime script lookups to repository base
+    content = content.replace(
+      /(["'])(?:\.?\/)?storage\/browser\/mizu\.all\.js/g,
+      `$1${repoPrefix}storage/browser/mizu.all.js`
+    );
 
     fs.writeFileSync(svgPath, content, "utf8");
   }
 
-  // 4. Subfolder page template
+  // 4. Subfolder wrapper template (forces localStorage wisp seed)
   function getPageHtml(svgTarget) {
     return `<!DOCTYPE html>
 <html lang="en">
@@ -127,6 +124,13 @@ async function runBuild() {
     html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #000; }
     object, embed, iframe { width: 100%; height: 100%; border: none; display: block; }
   </style>
+  <script>
+    try {
+      localStorage.setItem("wisp-server", "${TARGET_WISP}");
+      localStorage.setItem("bare-server", "${TARGET_WISP}");
+      localStorage.setItem("mizu-wisp", "${TARGET_WISP}");
+    } catch(e) {}
+  </script>
 </head>
 <body>
   <object data="${repoPrefix}${svgTarget}" type="image/svg+xml"></object>
@@ -163,13 +167,21 @@ async function runBuild() {
     const folderPath = path.join(distDir, nestedPath);
     fs.mkdirSync(folderPath, { recursive: true });
 
+    // Rotate across available SVGs
     const chosenSvg = svgFiles[Math.floor(Math.random() * svgFiles.length)];
     fs.writeFileSync(path.join(folderPath, "index.html"), getPageHtml(chosenSvg));
+
+    // Also supply local storage/browser directory inside subfolder to avoid any relative 404
+    if (mizuBuffer) {
+      const subStorage = path.join(folderPath, "storage", "browser");
+      fs.mkdirSync(subStorage, { recursive: true });
+      fs.writeFileSync(path.join(subStorage, "mizu.all.js"), mizuBuffer);
+    }
 
     masterLinksHtml += `<a class="card" href="${repoPrefix}${nestedPath}/">${nestedPath}</a>\n`;
   }
 
-  // 6. Directory index page
+  // 6. Directory index
   const masterIndexHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
